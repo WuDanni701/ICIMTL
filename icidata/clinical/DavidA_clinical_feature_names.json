@@ -1,0 +1,23 @@
+[
+    "TMB",
+    "Age",
+    "FS_Counts",
+    "NEO_Weak",
+    "ITH",
+    "Sex_F",
+    "Sex_M",
+    "MSKCC_FAVORABLE",
+    "MSKCC_INTERMEDIATE",
+    "MSKCC_POOR",
+    "homozygous_ANY_0",
+    "homozygous_ANY_1",
+    "Deletion_9p21.3_MUT",
+    "Deletion_9p21.3_WT",
+    "Deletion_11q23.1_MUT",
+    "Deletion_11q23.1_WT",
+    "Amplification_12q24.32_MUT",
+    "Amplification_12q24.32_WT",
+    "Amplification_12q24.32_WUT",
+    "Amplification_6q21_MUT",
+    "Amplification_6q21_WT"
+]
