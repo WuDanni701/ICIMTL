@@ -26,8 +26,6 @@ class SharedOnlyHead(nn.Module):
 
 
 class OnlyMTL(nn.Module):
-    """Remove task-specific feature encoders while retaining four MTL tasks."""
-
     def __init__(
         self,
         input_dim: int,
@@ -54,7 +52,6 @@ class OnlyMTL(nn.Module):
         self.to(device)
 
     def forward(self, shared_input, specific_input, task_ids, task_specific_slices):
-        # specific_input and task_specific_slices are intentionally unused.
         task_features, regularization_loss = self.shared_encoder(shared_input)
         logits = [None] * self.num_tasks
         for task_id in range(self.num_tasks):
