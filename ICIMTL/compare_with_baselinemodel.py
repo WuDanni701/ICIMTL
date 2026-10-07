@@ -5,6 +5,7 @@ import xgboost as xgb
 from sklearn.neural_network import MLPClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import RobustScaler
+from sklearn.impute import SimpleImputer
 import numpy as np
 import pandas as pd
 from utils1 import EarlyStopping,ICITransferTrainer
@@ -17,8 +18,9 @@ import os
 import json
 import re
 import random
+from pathlib import Path
 from sklearn.metrics import roc_curve, auc, confusion_matrix, average_precision_score, roc_auc_score,f1_score,accuracy_score
-from config import (output_dir_tcga, hidden_dims_list, noise_std, l2_reg, num_experts, learning_rate_train, batch_size,
+from config import (DATA_ROOT, output_dir_tcga, hidden_dims_list, noise_std, l2_reg, num_experts, learning_rate_train, batch_size,
                     latent_dim, logvar_max, logvar_min, gene_dropout, expert_dnn_hidden_units, gate_dnn_hidden_units,SEED)
 
 plt.rcParams.update({'font.size': 10})
@@ -28,12 +30,11 @@ np.random.seed(SEED)
 torch.manual_seed(SEED)
 
 def plot_cv_roc_curves(models_metrics_dict, task_id, task_name):
-    palette = ["#E41A1C", "#FF7F00", "#4D9943", "#E7BA52", "#999999", "#F7CAC9"]
     model_colors = {
-        "MTL": palette[0],
-        "Logistic Regression": palette[1],
-        "XGBoost": palette[2],
-        "Neural Network": palette[3]
+        "CoMET": "#F06F6A",
+        "Logistic Regression": "#62A8C4",
+        "XGBoost": "#F2A654",
+        "Neural Network": "#90BF58"
     }
     plt.figure(figsize=(8, 8))
     ax = plt.gca()
@@ -63,11 +64,17 @@ def plot_cv_roc_curves(models_metrics_dict, task_id, task_name):
         mean_tpr = np.mean(tprs, axis=0)
         mean_tpr[-1] = 1.0
         mean_auc = np.nanmean(aucs)
-        line_width = 3.2 if model_name == "MTL" else 2.2
+        line_width = 3.2 if model_name == "CoMET" else 2.2
+        name1 = {
+            "CoMET": "CoMET",
+            "Logistic Regression": "LR",
+            "XGBoost": "XGB",
+            "Neural Network": "NN"
+        }.get(model_name,model_name)
         plt.plot(
             mean_fpr,
             mean_tpr,
-            label=f'{model_name} (AUC = {mean_auc:.3f})',
+            label=f'{name1} (AUC = {mean_auc:.3f})',
             color=color,
             linewidth=line_width
         )
@@ -99,15 +106,17 @@ def plot_cv_roc_curves(models_metrics_dict, task_id, task_name):
         handles,
         labels,
         loc="lower right",
-        fontsize=13,
+        fontsize=15,
         title_fontsize=14,
         frameon=True,
-        borderpad=1.2,
-        labelspacing=1.0
+        borderpad=1.3,
+        labelspacing=1.1,
+        handlelength=2.2,
+        handletextpad=0.8
     )
     for text in legend.get_texts():
-        if text.get_text().startswith("MTL"):
-            text.set_color(model_colors["MTL"])
+        if text.get_text().startswith("CoMET"):
+            text.set_color(model_colors["CoMET"])
             text.set_fontweight("bold")
     plt.grid(alpha=0.3)
     plt.tight_layout()
@@ -201,30 +210,102 @@ def compute_all_metrics(y_true,y_prob,threshold = None):
     metrics['tpr'] = tpr
     return metrics
 
-def scale_fold(shared_feats,specific_feats,task_ids,train_idx,val_idx,shared_continuous_cols, task_specific_continuous_cols):
+def preprocess_fold(
+        shared_feats, specific_feats, task_ids, train_idx, val_idx,
+        shared_continuous_cols, task_specific_continuous_cols,
+        task_specific_categorical_groups):
     shared_scaled = shared_feats.copy()
     specific_scaled = specific_feats.copy()
-    fitted_scalers = { "shared": None,"specific": {}}
+    fitted_preprocessors = {
+        "shared": None,
+        "specific": {},
+        "categorical_modes": {},
+    }
     valid_shared_cols = [
         col for col in shared_continuous_cols
         if col in shared_scaled.columns
     ]
     if valid_shared_cols:
-        shared_scaler = RobustScaler()
-        shared_scaled.iloc[
-            train_idx,
-            shared_scaled.columns.get_indexer(valid_shared_cols)
-        ] = shared_scaler.fit_transform(
+        imputer = SimpleImputer(strategy="median")
+        scaler = RobustScaler()
+        train_values = imputer.fit_transform(
             shared_feats.iloc[train_idx][valid_shared_cols]
         )
-        shared_scaled.iloc[
-            val_idx,
-            shared_scaled.columns.get_indexer(valid_shared_cols)
-        ] = shared_scaler.transform(
+        val_values = imputer.transform(
             shared_feats.iloc[val_idx][valid_shared_cols]
         )
-        fitted_scalers["shared"] = shared_scaler
+        positions = shared_scaled.columns.get_indexer(valid_shared_cols)
+        shared_scaled.iloc[train_idx, positions] = scaler.fit_transform(train_values)
+        shared_scaled.iloc[val_idx, positions] = scaler.transform(val_values)
+        fitted_preprocessors["shared"] = {
+            "columns": valid_shared_cols,
+            "imputer": imputer,
+            "scaler": scaler,
+        }
+
     task_array = np.asarray(task_ids).astype(int)
+
+    for tid, groups in task_specific_categorical_groups.items():
+        task_train_idx = np.asarray(train_idx)[task_array[train_idx] == tid]
+        task_val_idx = np.asarray(val_idx)[task_array[val_idx] == tid]
+        fitted_preprocessors["categorical_modes"][tid] = {}
+
+        for group_name, columns in groups.items():
+            prefixed_cols = [f"t{tid}__{col}" for col in columns]
+            absent_cols = [
+                col for col in prefixed_cols
+                if col not in specific_scaled.columns
+            ]
+            if absent_cols:
+                raise ValueError(
+                    f"Missing columns for task {tid}, {group_name}: {absent_cols}"
+                )
+
+            train_group = specific_feats.iloc[task_train_idx][prefixed_cols]
+            train_all_missing = train_group.isna().all(axis=1)
+            train_partial_missing = (
+                train_group.isna().any(axis=1) & ~train_all_missing
+            )
+            if train_partial_missing.any():
+                raise ValueError(
+                    f"Partially missing one-hot group: task={tid}, group={group_name}"
+                )
+
+            observed_train = train_group.loc[~train_all_missing]
+            if observed_train.empty:
+                raise ValueError(
+                    f"No observed training values: task={tid}, group={group_name}"
+                )
+
+            mode_col = observed_train.sum(axis=0).idxmax()
+            mode_vector = np.zeros(len(prefixed_cols), dtype=float)
+            mode_vector[prefixed_cols.index(mode_col)] = 1.0
+            positions = specific_scaled.columns.get_indexer(prefixed_cols)
+
+            missing_train_idx = task_train_idx[train_all_missing.to_numpy()]
+            if len(missing_train_idx) > 0:
+                specific_scaled.iloc[missing_train_idx, positions] = mode_vector
+
+            if len(task_val_idx) > 0:
+                val_group = specific_feats.iloc[task_val_idx][prefixed_cols]
+                val_all_missing = val_group.isna().all(axis=1)
+                val_partial_missing = (
+                    val_group.isna().any(axis=1) & ~val_all_missing
+                )
+                if val_partial_missing.any():
+                    raise ValueError(
+                        f"Partially missing one-hot group: task={tid}, group={group_name}"
+                    )
+                missing_val_idx = task_val_idx[val_all_missing.to_numpy()]
+                if len(missing_val_idx) > 0:
+                    specific_scaled.iloc[missing_val_idx, positions] = mode_vector
+
+            fitted_preprocessors["categorical_modes"][tid][group_name] = {
+                "columns": prefixed_cols,
+                "mode_column": mode_col,
+                "mode_vector": mode_vector,
+            }
+
     for tid, continuous_cols in task_specific_continuous_cols.items():
         prefixed_cols = [
             f"t{tid}__{col}"
@@ -236,43 +317,64 @@ def scale_fold(shared_feats,specific_feats,task_ids,train_idx,val_idx,shared_con
         task_train_idx = np.asarray(train_idx)[task_array[train_idx] == tid]
         task_val_idx = np.asarray(val_idx)[task_array[val_idx] == tid]
         if len(task_train_idx) == 0:
-            continue
+            raise ValueError(f"No training samples for task {tid}")
+
+        imputer = SimpleImputer(strategy="median")
         scaler = RobustScaler()
-        col_positions = specific_scaled.columns.get_indexer(prefixed_cols)
-        specific_scaled.iloc[
-            task_train_idx,
-            col_positions
-        ] = scaler.fit_transform(
+        train_values = imputer.fit_transform(
             specific_feats.iloc[task_train_idx][prefixed_cols]
         )
+        positions = specific_scaled.columns.get_indexer(prefixed_cols)
+        specific_scaled.iloc[task_train_idx, positions] = scaler.fit_transform(
+            train_values
+        )
         if len(task_val_idx) > 0:
-            specific_scaled.iloc[
-                task_val_idx,
-                col_positions
-            ] = scaler.transform(
+            val_values = imputer.transform(
                 specific_feats.iloc[task_val_idx][prefixed_cols]
             )
-        fitted_scalers["specific"][tid] = scaler
-    return shared_scaled, specific_scaled, fitted_scalers
+            specific_scaled.iloc[task_val_idx, positions] = scaler.transform(
+                val_values
+            )
+        fitted_preprocessors["specific"][tid] = {
+            "columns": prefixed_cols,
+            "imputer": imputer,
+            "scaler": scaler,
+        }
+
+    for name, frame in {
+        "train shared": shared_scaled.iloc[train_idx],
+        "validation shared": shared_scaled.iloc[val_idx],
+        "train specific": specific_scaled.iloc[train_idx],
+        "validation specific": specific_scaled.iloc[val_idx],
+    }.items():
+        bad_cols = frame.columns[frame.isna().any()].tolist()
+        if bad_cols:
+            raise ValueError(f"NaN remains in {name}: {bad_cols}")
+        if not np.isfinite(frame.to_numpy(dtype=float)).all():
+            raise ValueError(f"Non-finite value remains in {name}")
+
+    return shared_scaled, specific_scaled, fitted_preprocessors
 
 def five_fold_cross_validation(freeze_shared=False):
     #read in data
-    output_dir = r".\output1"
+    CODE_DIR = Path(__file__).resolve().parent
+    PROJECT_ROOT = CODE_DIR.parent
+    output_dir = PROJECT_ROOT / "output1"
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     device = torch.device("cuda:7" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     cohort_paths = [
-        r".\icidata\clinical\DavidA_clinical.csv",
-        r".\icidata\clinical\DavidLiu_clinical.csv",
-        r".\icidata\clinical\Ravi_clinical.csv",
-        r".\icidata\clinical\IMvigor210_clinical.csv"
+        DATA_ROOT / "clinical" / "DavidA_clinical.csv",
+        DATA_ROOT / "clinical" / "DavidLiu_clinical.csv",
+        DATA_ROOT / "clinical" / "Ravi_clinical.csv",
+        DATA_ROOT / "clinical" / "IMvigor210_clinical.csv",
     ]
     rna_paths = [
-        r".\icidata\rna\DavidA_rna.csv",
-        r".\icidata\rna\DavidLiu_rna.csv",
-        r".\icidata\rna\Ravi_rna.csv",
-        r".\icidata\rna\IMvigor210_rna.csv"
+        DATA_ROOT / "rna" / "DavidA_rna.csv",
+        DATA_ROOT / "rna" / "DavidLiu_rna.csv",
+        DATA_ROOT / "rna" / "Ravi_rna.csv",
+        DATA_ROOT / "rna" / "IMvigor210_rna.csv",
     ]
     shared_feature_cols = ["Sex_F", "Sex_M", "TMB"]
     task_specific_feature_cols = [
@@ -288,7 +390,6 @@ def five_fold_cross_validation(freeze_shared=False):
          "Deletion_9p21.3_MUT",
          "Deletion_9p21.3_WT",
          "Deletion_11q23.1_MUT",
-         "Deletion_11q23.1_NMUT",
          "Deletion_11q23.1_WT",
          "Amplification_12q24.32_MUT",
          "Amplification_12q24.32_WT",
@@ -340,10 +441,6 @@ def five_fold_cross_validation(freeze_shared=False):
             "TC.Level_TC0",
             "TC.Level_TC1",
             "TC.Level_TC2+",
-            "Immune.phenotype_desert",
-            "Immune.phenotype_excluded",
-            "Immune.phenotype_inflamed",
-            "Immune.phenotype_unknown",
             "Lund_MS1a",
             "Lund_MS1b",
             "Lund_MS2a1",
@@ -362,6 +459,30 @@ def five_fold_cross_validation(freeze_shared=False):
         1:["CNA_prop","heterogeneity","Purity","MHC-II","TMB_clonal","TMB_subclonal"],
         2:[ "Purity","Smoking_Pack_Years","Neoantigens","TMB_clonal","TMB_subclonal"],
         3:["Neoantigen_burden"]
+    }
+    task_specific_categorical_groups = {
+        0: {
+            "MSKCC": [
+                "MSKCC_FAVORABLE", "MSKCC_INTERMEDIATE", "MSKCC_POOR"
+            ],
+            "Deletion_9p21.3": [
+                "Deletion_9p21.3_MUT", "Deletion_9p21.3_WT"
+            ],
+            "Deletion_11q23.1": [
+                "Deletion_11q23.1_MUT", "Deletion_11q23.1_WT"
+            ],
+            "Amplification_12q24.32": [
+                "Amplification_12q24.32_MUT",
+                "Amplification_12q24.32_WT",
+                "Amplification_12q24.32_WUT",
+            ],
+            "Amplification_6q21": [
+                "Amplification_6q21_MUT", "Amplification_6q21_WT"
+            ],
+        },
+        1: {
+            "ECOG": ["ECOG_0", "ECOG_1", "ECOG_2", "ECOG_3"],
+        },
     }
     selected_genes, ss, enc_state, se_path = load_tcga_artifacts(output_dir_tcga)
     # autoencoder parameter
@@ -408,14 +529,15 @@ def five_fold_cross_validation(freeze_shared=False):
     for fold, (train_idx, val_idx) in enumerate(skf.split(y,y_start),0):
         torch.manual_seed(SEED)
         print(f"Fold {fold + 1}/5")
-        fold_shared_feats, fold_specific_feats, clinical_scalers = (
-            scale_fold(shared_feats=shared_feats,
+        fold_shared_feats, fold_specific_feats, clinical_preprocessors = (
+            preprocess_fold(shared_feats=shared_feats,
             specific_feats=specific_feats,
             task_ids=task_ids,
             train_idx=train_idx,
             val_idx=val_idx,
             shared_continuous_cols=shared_continuous_cols,
-            task_specific_continuous_cols=task_specific_continuous_cols)
+            task_specific_continuous_cols=task_specific_continuous_cols,
+            task_specific_categorical_groups=task_specific_categorical_groups)
         )
         train_dataset = ICIDataset(encoded_rna.iloc[train_idx], fold_shared_feats.iloc[train_idx],
                                   fold_specific_feats.iloc[train_idx], responses.iloc[train_idx],
@@ -425,7 +547,7 @@ def five_fold_cross_validation(freeze_shared=False):
                                 fold_specific_feats.iloc[val_idx], responses.iloc[val_idx],
                                 task_ids.iloc[val_idx], OSs.iloc[val_idx], OSEs.iloc[val_idx],TMB_origin.iloc[val_idx],
                                 task_feature_dims)
-        train_loader = DataLoader(train_dataset, batch_size=batch_size,  shuffle=True, drop_last=True)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size,  shuffle=True, drop_last=False)
         val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
         model = ICIMTL(
             shared_input_dim=encoded_rna.shape[1] + fold_shared_feats.shape[1],
@@ -494,7 +616,7 @@ def five_fold_cross_validation(freeze_shared=False):
         trainer = ICITransferTrainer(model, device, learning_rate=learning_rate_train, freeze_shared=freeze_shared)
         trainer.update_pos_weights_from_loader(train_loader)
         trainer.task_slices = train_dataset.task_slices
-        early_stop = EarlyStopping(patience=10,min_delta=1e-4,monitor="auc",mode="max")
+        early_stop = EarlyStopping(patience=13,min_delta=1e-4,monitor="auc",mode="max")
         best_model_path = os.path.join(output_dir, f"best_model_fold_{fold}.pth")
         for epoch in range(50):
             train_loss, train_metrics = trainer.train_epoch(train_loader)
@@ -565,7 +687,7 @@ def five_fold_cross_validation(freeze_shared=False):
             X_val_task.columns = X_val_task.columns.astype(str)
             cohort_name = task_id_to_cohort[tid]
             #lr
-            lr_model = LogisticRegression(max_iter=1500, C=0.5, solver='lbfgs',random_state=SEED)
+            lr_model = LogisticRegression(max_iter=500, solver='liblinear',random_state=SEED)
             lr_model.fit(X_train_task, y_train_task)
             y_prob_lr = lr_model.predict_proba(X_val_task)[:, 1]
             all_metrics_lr[tid].append(compute_all_metrics(y_val_task, y_prob_lr, threshold=0.5))
@@ -624,12 +746,12 @@ def five_fold_cross_validation(freeze_shared=False):
             print(f"    AUC:      {np.nanmean(aucs):.4f} ± {np.nanstd(aucs):.4f}")
             print(f"    AUPRC:    {np.nanmean(auprcs):.4f} ± {np.nanstd(auprcs):.4f}")
             print(f"    F1 Score: {np.nanmean(f1s):.4f} ± {np.nanstd(f1s):.4f}")
-        print_model_metrics("MTL", all_metrics_icimtl)
+        print_model_metrics("CoMET", all_metrics_icimtl)
         print_model_metrics("Logistic Regression", all_metrics_lr)
         print_model_metrics("XGBoost", all_metrics_xgboost)
         print_model_metrics("Neural Network", all_metrics_mlp)
         models_to_plot = {
-            "MTL": all_metrics_icimtl,
+            "CoMET": all_metrics_icimtl,
             "Logistic Regression": all_metrics_lr,
             "XGBoost": all_metrics_xgboost,
             "Neural Network": all_metrics_mlp

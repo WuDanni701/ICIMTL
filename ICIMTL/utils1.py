@@ -31,7 +31,7 @@ class EarlyStopping:
         return self.counter >= self.patience
 
 class ICITransferTrainer:
-    def __init__(self, model, device, learning_rate=1e-4, freeze_shared=False,task_weights=[0.48, 0.54, 0.5,0.55]):
+    def __init__(self, model, device, learning_rate=1e-4, freeze_shared=False,task_weights=[0.48, 0.57, 0.5,0.6]):
         self.model = model
         self.device = device
         self.freeze_shared = freeze_shared
@@ -52,13 +52,13 @@ class ICITransferTrainer:
             })
             param_groups.append({
                 "params": shared_gate_params,
-                "lr": learning_rate * 0.1,
-                "weight_decay": 1e-5
+                "lr": learning_rate * 0.5,
+                "weight_decay": 1e-4
             })
         else:
             param_groups.append({
                 "params": expert_params,
-                "lr": learning_rate * 0.5,
+                "lr": learning_rate,
                 "weight_decay": 1e-4
             })
             param_groups.append({

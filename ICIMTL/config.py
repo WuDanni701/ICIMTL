@@ -1,3 +1,9 @@
+from pathlib import Path
+import os
+CODE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = CODE_DIR.parent
+DATA_ROOT = PROJECT_ROOT / "icidata"
+output_dir_tcga = PROJECT_ROOT / "TCGA_pretraining"
 latent_dim = 20
 hidden_dims_list = [128, 64]
 noise_std = 0.004
@@ -13,4 +19,3 @@ weight_decay = 2e-4
 num_experts = 2
 batch_size=45
 learning_rate_train=1e-3
-output_dir_tcga = "./TCGA_pretraining"
