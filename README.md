@@ -1,7 +1,3 @@
-from pathlib import Path
-
-readme = r"""# CoMET
-
 **CoMET** is a cohort-adaptive multi-omics multi-task learning framework for predicting objective response to immune checkpoint blockade (ICB) across heterogeneous patient cohorts.
 
 The implementation integrates transcriptomic representations learned from TCGA, cohort-shared clinical/genomic covariates, cohort-specific variables, and a Multi-gate Mixture-of-Experts (MMoE) backbone with cohort-specific prediction heads.
