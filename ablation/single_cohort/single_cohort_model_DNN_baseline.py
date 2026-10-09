@@ -333,7 +333,7 @@ def parse_args():
     parser.add_argument("--device", default="cuda:7" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--patience", type=int, default=10)
+    parser.add_argument("--patience", type=int, default=13)
     parser.add_argument("--batch-size", type=int, default=batch_size)
     parser.add_argument("--learning-rate", type=float, default=learning_rate_train)
     parser.add_argument("--seed", type=int, default=SEED)

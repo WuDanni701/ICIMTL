@@ -266,7 +266,7 @@ def five_fold_cross_validation():
         trainer = ICITrainer(model, device, learning_rate=1e-4)
         trainer.update_pos_weights_from_loader(train_loader)
         trainer.task_slices = train_dataset.task_slices
-        early_stop = EarlyStopping(patience=10,min_delta=1e-4,monitor="auc",mode="max")
+        early_stop = EarlyStopping(patience=13,min_delta=1e-4,monitor="auc",mode="max")
         best_model_path = output_dir / f"best_model_fold_{fold}.pth"
         for epoch in range(50):
             train_loss, train_metrics = trainer.train_epoch(train_loader)
